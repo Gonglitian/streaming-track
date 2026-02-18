@@ -1,13 +1,21 @@
-# GVHMR repo (cloned separately)
-gvhmr_repo/
-
-# Outputs
-outputs/
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
+
+# GVHMR repo (cloned separately)
+gvhmr_repo/
+
+# Third-party repos (tracked as submodule or cloned separately)
+third_party/GMR/
+
+# SMPL-X body models (must be downloaded manually)
+**/body_models/
+
+# Outputs
+outputs/
+data/sample_output/
 
 # Weights & models
 *.pt
@@ -15,3 +23,11 @@ __pycache__/
 *.ckpt
 *.pkl
 *.npz
+
+# Videos
+videos/
+*.mp4
+
+# IDE
+.vscode/
+.idea/
