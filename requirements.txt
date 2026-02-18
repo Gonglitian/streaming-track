@@ -34,7 +34,7 @@ lapx
 imageio==2.34.1
 av==13.0.0
 ffmpeg-python
-opencv-python
+opencv-python>=4.8.0
 scikit-image
 matplotlib
 
