@@ -36,7 +36,7 @@ import numpy as np
 SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 GMR_ROOT = PROJECT_ROOT / "third_party" / "GMR"
-GVHMR_DIR = PROJECT_ROOT / "gvhmr_repo"
+GVHMR_DIR = PROJECT_ROOT / "third_party" / "GVHMR"
 BODY_MODELS_DIR = GMR_ROOT / "assets" / "body_models"
 
 sys.path.insert(0, str(PROJECT_ROOT))

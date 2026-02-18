@@ -41,6 +41,35 @@ class MujocoPlayback:
         self._renderer = None
         self._viewer = None
 
+    def render_frame(self, qpos: np.ndarray) -> np.ndarray:
+        """Render a single frame for the given qpos.
+
+        Args:
+            qpos: (36,) array — [root_pos(3) + root_quat_wxyz(4) + dof(29)]
+
+        Returns:
+            BGR image as (H, W, 3) uint8 array.
+        """
+        if self._renderer is None:
+            self._renderer = mj.Renderer(self.model, height=self.height, width=self.width)
+
+        self.data.qpos[:] = qpos
+        mj.mj_forward(self.model, self.data)
+
+        cam = mj.MjvCamera()
+        cam.type = mj.mjtCamera.mjCAMERA_FREE
+        cam.distance = 3.0
+        cam.elevation = -10
+        # Track pelvis
+        pelvis_id = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_BODY, "pelvis")
+        if pelvis_id > 0:
+            cam.lookat[:] = self.data.xpos[pelvis_id]
+
+        self._renderer.update_scene(self.data, cam)
+        rgb = self._renderer.render()
+        import cv2
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
     def play(
         self,
         qpos_sequence: np.ndarray,

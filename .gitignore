@@ -9,7 +9,7 @@ build/
 venv/
 
 # GVHMR repo (cloned separately)
-gvhmr_repo/
+third_party/GVHMR/
 
 # Third-party repos (tracked as submodule or cloned separately)
 third_party/GMR/
