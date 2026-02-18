@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Data outputs
+data/sample_output/
+
+# Third-party repos (tracked as submodule or cloned separately)
+third_party/GMR/
+
+# SMPL-X body models (must be downloaded manually)
+**/body_models/
+
+# Videos
+videos/
+*.mp4
+
+# IDE
+.vscode/
+.idea/
