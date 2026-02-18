@@ -21,6 +21,13 @@ bash scripts/setup_body_models.sh [path_to_models.zip]
 ## Architecture
 
 - `third_party/GMR/` - General Motion Retargeting library (IK-based)
+- `gvhmr_repo/` - GVHMR inference (cloned by `scripts/gvhmr_setup.sh`)
+- `src/camera/` - USB camera capture (detect, record, stream)
+- `src/bridge/` - GVHMR→GMR data bridge and MuJoCo playback
+  - `gvhmr_to_gmr.py` - Converts GVHMR .pt → per-joint dicts via SMPL-X forward pass
+  - `mujoco_playback.py` - Headless/interactive G1 playback with video export
+- `scripts/offline_pipeline.py` - End-to-end offline pipeline (record→GVHMR→GMR→MuJoCo)
+- `scripts/gvhmr_infer.py` - GVHMR inference on video files
 - `scripts/verify_gmr.py` - Deployment verification (6-check suite)
 - `scripts/benchmark_retarget.py` - Performance benchmarks
 - `scripts/setup_body_models.sh` - SMPL-X body model setup helper
@@ -40,6 +47,35 @@ from general_motion_retargeting import GeneralMotionRetargeting as GMR
 retarget = GMR(actual_human_height=1.8, src_human="smplx", tgt_robot="unitree_g1")
 qpos = retarget.retarget(human_data)  # dict of {body_name: (pos, quat_wxyz)}
 # qpos: [7 (root pos+quat) + 29 (joint DOFs)] = 36 dims
+```
+
+## Offline Pipeline
+
+```bash
+# Full pipeline: record 10s video → GVHMR → GMR → MuJoCo viewer
+python scripts/offline_pipeline.py --record --duration 10 -s
+
+# From existing video (static camera)
+python scripts/offline_pipeline.py --video videos/my_motion.mp4 -s
+
+# From existing GVHMR .pt result (skip recording + inference)
+python scripts/offline_pipeline.py --gvhmr_pt outputs/result.pt
+
+# Headless video export (no GUI)
+python scripts/offline_pipeline.py --video input.mp4 -s --headless --export_video playback.mp4
+
+# Retarget only (no playback)
+python scripts/offline_pipeline.py --video input.mp4 -s --no_playback
+```
+
+### Data Flow
+
+```
+USB Camera / MP4 → GVHMR .pt (smpl_params_global)
+    → SMPL-X forward pass (src/bridge/gvhmr_to_gmr.py)
+    → {joint_name: (pos, quat_wxyz)} per frame
+    → GMR.retarget() → qpos [36-dim]
+    → MuJoCo viewer / video export
 ```
 
 ## Running
