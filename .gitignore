@@ -1,0 +1,17 @@
+# GVHMR repo (cloned separately)
+gvhmr_repo/
+
+# Outputs
+outputs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Weights & models
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.npz
