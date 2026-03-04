@@ -91,6 +91,7 @@ def gvhmr_to_smplx_frames(
     gvhmr_result: dict,
     smplx_model_path: str,
     tgt_fps: int = 30,
+    body_model=None,
 ) -> tuple[list[dict], float, float]:
     """Convert GVHMR output to per-frame SMPL-X joint dicts for GMR.
 
@@ -101,6 +102,7 @@ def gvhmr_to_smplx_frames(
         gvhmr_result: Output of load_gvhmr_result()
         smplx_model_path: Path to body_models/ directory containing smplx/
         tgt_fps: Target FPS for output (resamples if needed)
+        body_model: Pre-created SMPLX body model (avoids re-creating each call)
 
     Returns:
         (frames, aligned_fps, human_height) where frames is a list of
@@ -120,12 +122,13 @@ def gvhmr_to_smplx_frames(
     # Estimate human height from shape parameter
     human_height = 1.66 + 0.1 * betas_16[0]
 
-    # Create SMPL-X body model and run forward pass
-    body_model = smplx_lib.create(
-        smplx_model_path, "smplx",
-        gender="neutral", use_pca=False,
-        num_betas=16, batch_size=num_frames,
-    )
+    # Create SMPL-X body model and run forward pass (or reuse provided one)
+    if body_model is None:
+        body_model = smplx_lib.create(
+            smplx_model_path, "smplx",
+            gender="neutral", use_pca=False,
+            num_betas=16, batch_size=num_frames,
+        )
 
     betas_t = torch.from_numpy(betas_16).unsqueeze(0).expand(num_frames, -1).float()
     body_pose_t = torch.from_numpy(body_pose).float()
@@ -133,6 +136,7 @@ def gvhmr_to_smplx_frames(
     transl_t = torch.from_numpy(transl).float()
     zeros_hand = torch.zeros(num_frames, 45)
     zeros_3 = torch.zeros(num_frames, 3)
+    zeros_expr = torch.zeros(num_frames, 10)
 
     with torch.no_grad():
         smplx_out = body_model(
@@ -145,6 +149,7 @@ def gvhmr_to_smplx_frames(
             jaw_pose=zeros_3,
             leye_pose=zeros_3,
             reye_pose=zeros_3,
+            expression=zeros_expr,
             return_full_pose=True,
         )
 
@@ -185,6 +190,21 @@ def gvhmr_to_smplx_frames(
             pos_corrected = pos @ _Y_UP_TO_Z_UP.T
             quat_corrected = _quat_mul(_Y_UP_TO_Z_UP_QUAT, quat)
             frame[name] = (pos_corrected, quat_corrected)
+
+    # Ground the skeleton: shift so lowest foot joint sits at z=0.
+    # Without GVHMR postprocessing, the global translation is ungrounded.
+    _FOOT_JOINTS = ("left_ankle", "right_ankle", "left_foot", "right_foot")
+    min_z = float("inf")
+    for frame in frames:
+        for name in _FOOT_JOINTS:
+            if name in frame:
+                min_z = min(min_z, frame[name][0][2])
+    if np.isfinite(min_z):
+        offset = np.array([0.0, 0.0, -min_z])
+        for frame in frames:
+            for name in list(frame.keys()):
+                pos, quat = frame[name]
+                frame[name] = (pos + offset, quat)
 
     # FPS resampling if needed (GVHMR outputs at 30 FPS)
     src_fps = 30.0

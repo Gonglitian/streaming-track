@@ -28,12 +28,14 @@ class CameraRecorder:
         width: int = 640,
         height: int = 480,
         fps: int = 30,
+        preview: bool = False,
     ):
         self.camera_index = camera_index
         self.output_path = Path(output_path)
         self.width = width
         self.height = height
         self.fps = fps
+        self.preview = preview
 
         self._cap: cv2.VideoCapture | None = None
         self._writer: cv2.VideoWriter | None = None
@@ -58,10 +60,15 @@ class CameraRecorder:
         actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        self._writer = cv2.VideoWriter(
-            str(self.output_path), fourcc, self.fps, (actual_w, actual_h)
-        )
+        # Use H.264 codec for broad compatibility; fall back to mp4v
+        for codec in ["avc1", "x264", "X264", "mp4v"]:
+            fourcc = cv2.VideoWriter_fourcc(*codec)
+            self._writer = cv2.VideoWriter(
+                str(self.output_path), fourcc, self.fps, (actual_w, actual_h)
+            )
+            if self._writer.isOpened():
+                break
+            self._writer.release()
 
         self._running.set()
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -77,6 +84,7 @@ class CameraRecorder:
 
     def _capture_loop(self) -> None:
         frame_interval = 1.0 / self.fps
+        window_name = "Recording (press 'q' to stop)" if self.preview else None
         while self._running.is_set():
             t0 = time.monotonic()
             ret, frame = self._cap.read()
@@ -85,10 +93,19 @@ class CameraRecorder:
             self._writer.write(frame)
             self._fps_counter.tick()
 
+            if self.preview:
+                cv2.imshow(window_name, frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    self._running.clear()
+                    break
+
             elapsed = time.monotonic() - t0
             sleep_time = frame_interval - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
+        if self.preview:
+            cv2.destroyWindow(window_name)
 
     def _release(self) -> None:
         if self._writer:

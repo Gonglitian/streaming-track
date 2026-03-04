@@ -8,11 +8,8 @@ build/
 .venv/
 venv/
 
-# GVHMR repo (cloned separately)
-third_party/GVHMR/
-
-# Third-party repos (tracked as submodule or cloned separately)
-third_party/GMR/
+# Third-party repos (managed as git submodules)
+# See: third_party/GMR, third_party/GVHMR
 
 # SMPL-X body models (must be downloaded manually)
 **/body_models/

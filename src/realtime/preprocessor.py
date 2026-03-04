@@ -7,6 +7,9 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import contextlib
+import os
+
 import cv2
 import numpy as np
 import torch
@@ -14,6 +17,16 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 GVHMR_DIR = PROJECT_ROOT / "third_party" / "GVHMR"
 sys.path.insert(0, str(GVHMR_DIR))
+
+
+@contextlib.contextmanager
+def _chdir(path):
+    old = os.getcwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(old)
 
 
 @dataclass
@@ -40,7 +53,13 @@ class RealtimePreprocessor:
         height: int = 480,
         device: str = "cuda",
         yolo_model: str = "yolov8s.pt",
+        yolo_interval: int = 5,
     ):
+        """
+        Args:
+            yolo_interval: Run YOLO detection every N frames.
+                           Reuses cached bbox on intermediate frames to save ~30-40ms.
+        """
         self._width = width
         self._height = height
         self._device = torch.device(device)
@@ -50,6 +69,12 @@ class RealtimePreprocessor:
         self._vitpose = None
         self._hmr2 = None
         self._yolo_model_name = yolo_model
+
+        # Bbox caching: skip YOLO on most frames
+        self._yolo_interval = yolo_interval
+        self._cached_bbx_xyxy = None
+        self._cached_bbx_xys = None
+        self._frames_since_detect = 0
 
         # Pre-compute camera intrinsics (constant for fixed resolution)
         from hmr4d.utils.geo.hmr_cam import estimate_K
@@ -79,7 +104,9 @@ class RealtimePreprocessor:
     def _load_vitpose(self):
         """Load ViTPose for 2D keypoint estimation."""
         from hmr4d.utils.preproc.vitpose import VitPoseExtractor
-        self._vitpose = VitPoseExtractor(tqdm_leave=False)
+        # VitPoseExtractor uses relative path for checkpoint — need CWD = GVHMR_DIR
+        with _chdir(GVHMR_DIR):
+            self._vitpose = VitPoseExtractor(tqdm_leave=False)
         print("[Preproc] ViTPose loaded")
 
     def _load_hmr2(self):
@@ -100,45 +127,80 @@ class RealtimePreprocessor:
         """
         self._ensure_models()
 
-        h, w = frame.shape[:2]
-
-        # 1. YOLO person detection
-        results = self._yolo(frame, classes=[0], conf=0.5, verbose=False)
-        boxes = results[0].boxes
-
-        if len(boxes) == 0:
-            return FrameFeatures(
-                bbx_xys=torch.zeros(3),
-                bbx_xyxy=torch.zeros(4),
-                kp2d=torch.zeros(17, 3),
-                vit_features=torch.zeros(1024),
-                K_fullimg=self._K_fullimg.squeeze(0),
-                valid=False,
-            )
-
-        # Pick the largest person detection
-        areas = (boxes.xyxy[:, 2] - boxes.xyxy[:, 0]) * (boxes.xyxy[:, 3] - boxes.xyxy[:, 1])
-        best_idx = areas.argmax().item()
-        bbx_xyxy = boxes.xyxy[best_idx].cpu().float()  # (4,)
-
-        # Convert to bbx_xys format [cx, cy, scale]
         from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy
-        bbx_xys = get_bbx_xys_from_xyxy(
-            bbx_xyxy.unsqueeze(0), base_enlarge=1.2
-        ).float().squeeze(0)  # (3,)
 
-        # 2. ViTPose: extract 2D keypoints
-        # Wrap single frame as (1, 3) for bbx_xys input
+        # 1. YOLO person detection (with bbox caching to skip most frames)
+        run_yolo = (
+            self._cached_bbx_xyxy is None
+            or self._frames_since_detect >= self._yolo_interval
+        )
+        if run_yolo:
+            results = self._yolo(frame, classes=[0], conf=0.5, verbose=False)
+            boxes = results[0].boxes
+
+            if len(boxes) == 0:
+                self._cached_bbx_xyxy = None
+                self._cached_bbx_xys = None
+                self._frames_since_detect = 0
+                return FrameFeatures(
+                    bbx_xys=torch.zeros(3),
+                    bbx_xyxy=torch.zeros(4),
+                    kp2d=torch.zeros(17, 3),
+                    vit_features=torch.zeros(1024),
+                    K_fullimg=self._K_fullimg.squeeze(0),
+                    valid=False,
+                )
+
+            # Pick the largest person detection
+            areas = (boxes.xyxy[:, 2] - boxes.xyxy[:, 0]) * (boxes.xyxy[:, 3] - boxes.xyxy[:, 1])
+            best_idx = areas.argmax().item()
+            bbx_xyxy = boxes.xyxy[best_idx].cpu().float()
+            bbx_xys = get_bbx_xys_from_xyxy(
+                bbx_xyxy.unsqueeze(0), base_enlarge=1.2
+            ).float().squeeze(0)
+
+            self._cached_bbx_xyxy = bbx_xyxy
+            self._cached_bbx_xys = bbx_xys
+            self._frames_since_detect = 0
+        else:
+            # Reuse cached bbox
+            bbx_xyxy = self._cached_bbx_xyxy
+            bbx_xys = self._cached_bbx_xys
+            self._frames_since_detect += 1
+
+        # 2. Preprocess frame: crop & resize to 256x256 (same as get_batch)
+        from hmr4d.network.hmr2.utils.preproc import crop_and_resize, IMAGE_MEAN, IMAGE_STD
+
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_tensor = torch.from_numpy(frame_rgb).permute(2, 0, 1).unsqueeze(0).float()  # (1, 3, H, W)
-        kp2d = self._vitpose.extract(frame_tensor, bbx_xys.unsqueeze(0))  # (1, 17, 3)
-        kp2d = kp2d.squeeze(0)  # (17, 3)
+        img_ds = 0.5
+        img_dst_size = 256
+        frame_ds = cv2.resize(frame_rgb, (0, 0), fx=img_ds, fy=img_ds)
 
-        # 3. HMR2: extract visual features
+        gt_bbx_size_ds = bbx_xys[2].item() * img_ds
+        ds_factor = (gt_bbx_size_ds * 1.0) / img_dst_size / 2.0
+        if ds_factor > 1.1:
+            frame_ds = cv2.GaussianBlur(frame_ds, (5, 5), (ds_factor - 1) / 2)
+
+        img_crop, bbx_xys_ds = crop_and_resize(
+            frame_ds,
+            bbx_xys[:2].numpy() * img_ds,
+            bbx_xys[2].item() * img_ds,
+            img_dst_size,
+            enlarge_ratio=1.0,
+        )
+        img_crop_t = torch.from_numpy(img_crop).float()
+        img_crop_t = ((img_crop_t / 255.0 - IMAGE_MEAN) / IMAGE_STD).permute(2, 0, 1)
+        img_batch = img_crop_t.unsqueeze(0)
+
+        bbx_xys_for_model = torch.from_numpy(bbx_xys_ds).float().unsqueeze(0) / img_ds
+
+        # 3. ViTPose: extract 2D keypoints
+        kp2d = self._vitpose.extract(img_batch, bbx_xys_for_model).squeeze(0)
+
+        # 4. HMR2: extract visual features
         vit_features = self._hmr2.extract_video_features(
-            frame_tensor, bbx_xys.unsqueeze(0)
-        )  # (1, 1024)
-        vit_features = vit_features.squeeze(0)  # (1024,)
+            img_batch, bbx_xys_for_model
+        ).squeeze(0)
 
         return FrameFeatures(
             bbx_xys=bbx_xys,

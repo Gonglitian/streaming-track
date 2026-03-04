@@ -47,10 +47,10 @@ def main():
     # GVHMR
     parser.add_argument("-s", "--static-cam", action="store_true", default=True,
                         help="Assume static camera (default: True)")
-    parser.add_argument("--window", type=int, default=90,
-                        help="GVHMR sliding window size in frames (default: 90)")
-    parser.add_argument("--stride", type=int, default=15,
-                        help="GVHMR inference stride in frames (default: 15)")
+    parser.add_argument("--window", type=int, default=60,
+                        help="GVHMR sliding window size in frames (default: 60)")
+    parser.add_argument("--stride", type=int, default=8,
+                        help="GVHMR inference stride in frames (default: 8)")
 
     # Smoothing
     parser.add_argument("--ema-alpha", type=float, default=0.3,
@@ -70,6 +70,10 @@ def main():
     parser.add_argument("--vis-all", action="store_true",
                         help="Enable all visualization")
 
+    # Debug
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable debug profiling (per-stage timing)")
+
     args = parser.parse_args()
 
     if args.vis_all:
@@ -88,6 +92,7 @@ def main():
     print(f"  Smoothing: EMA alpha={args.ema_alpha}")
     print(f"  Display: {'headless' if args.headless else 'GUI'}")
     print(f"  Vis: pose={args.vis_pose} dashboard={args.vis_dashboard} compare={args.vis_compare}")
+    print(f"  Debug: {args.debug}")
     print()
     print("  Press 'q' in the preview window or Ctrl+C to quit.")
     print()
@@ -105,6 +110,7 @@ def main():
         vis_pose=args.vis_pose,
         vis_dashboard=args.vis_dashboard,
         vis_compare=args.vis_compare,
+        debug=args.debug,
     )
 
     with pipeline:

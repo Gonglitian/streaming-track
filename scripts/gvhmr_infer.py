@@ -32,18 +32,6 @@ def _chdir(path):
 
 import torch
 import numpy as np
-from hydra import initialize_config_module, compose
-
-from hmr4d.configs import register_store_gvhmr
-from hmr4d.utils.pylogger import Log
-from hmr4d.utils.video_io_utils import get_video_lwh, get_writer, get_video_reader
-from hmr4d.utils.preproc import Tracker, Extractor, VitPoseExtractor, SimpleVO
-from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy, estimate_K, convert_K_to_K4, create_camera_sensor
-from hmr4d.utils.geo_transform import compute_cam_angvel
-from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
-from hmr4d.utils.net_utils import detach_to_cpu, to_cuda
-from tqdm import tqdm
-import hydra
 
 
 def run_inference(video_path: str, output_path: str, static_cam: bool = False,
@@ -71,6 +59,20 @@ def run_inference(video_path: str, output_path: str, static_cam: bool = False,
 def _run_inference_impl(video_path, output_path, static_cam, skip_render, f_mm):
     """Inner implementation that runs inside GVHMR_DIR context."""
     with _chdir(GVHMR_DIR):
+        from hydra import initialize_config_module, compose
+        import hydra as _hydra
+        from hmr4d.configs import register_store_gvhmr
+        from hmr4d.utils.pylogger import Log
+        from hmr4d.utils.video_io_utils import get_video_lwh, get_writer, get_video_reader
+        from hmr4d.utils.preproc.tracker import Tracker
+        from hmr4d.utils.preproc.vitfeat_extractor import Extractor
+        from hmr4d.utils.preproc.vitpose import VitPoseExtractor
+        from hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy, estimate_K, convert_K_to_K4, create_camera_sensor
+        from hmr4d.utils.geo_transform import compute_cam_angvel
+        from hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
+        from hmr4d.utils.net_utils import detach_to_cpu, to_cuda
+        from tqdm import tqdm
+
         length, width, height = get_video_lwh(video_path)
         Log.info(f"[Input] {video_path}: {length} frames, {width}x{height}")
 
@@ -90,8 +92,19 @@ def _run_inference_impl(video_path, output_path, static_cam, skip_render, f_mm):
         Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
         Path(cfg.preprocess_dir).mkdir(parents=True, exist_ok=True)
 
-        # Copy video to working dir
-        if not Path(cfg.video_path).exists():
+        # Copy video to working dir (detect stale cache by comparing mtime)
+        import shutil
+        cached_video = Path(cfg.video_path)
+        if cached_video.exists():
+            src_mtime = video_path.stat().st_mtime
+            dst_mtime = cached_video.stat().st_mtime
+            if src_mtime > dst_mtime:
+                Log.info("[Cache] Source video is newer than cache, clearing stale data...")
+                shutil.rmtree(cfg.preprocess_dir, ignore_errors=True)
+                Path(cfg.preprocess_dir).mkdir(parents=True, exist_ok=True)
+                cached_video.unlink()
+
+        if not cached_video.exists():
             reader = get_video_reader(video_path)
             writer = get_writer(cfg.video_path, fps=30, crf=23)
             for img in tqdm(reader, total=length, desc="Copy video"):
@@ -134,6 +147,7 @@ def _run_inference_impl(video_path, output_path, static_cam, skip_render, f_mm):
         # 4. Visual odometry (if not static cam)
         if not static_cam:
             if not Path(paths.slam).exists():
+                from hmr4d.utils.preproc.relpose.simple_vo import SimpleVO
                 simple_vo = SimpleVO(cfg.video_path, scale=0.5, step=8, method="sift", f_mm=f_mm)
                 vo_results = simple_vo.compute()
                 torch.save(vo_results, paths.slam)
@@ -165,7 +179,7 @@ def _run_inference_impl(video_path, output_path, static_cam, skip_render, f_mm):
 
         # === GVHMR Inference === #
         Log.info("[GVHMR] Running model inference...")
-        model: DemoPL = hydra.utils.instantiate(cfg.model, _recursive_=False)
+        model: DemoPL = _hydra.utils.instantiate(cfg.model, _recursive_=False)
         model.load_pretrained_model(cfg.ckpt_path)
         model = model.eval().cuda()
 
@@ -189,6 +203,64 @@ def _run_inference_impl(video_path, output_path, static_cam, skip_render, f_mm):
         return pred
 
 
+def render_incam(video_path: str, pt_path: str, output_video: str):
+    """Render SMPL mesh overlay on original video (image-aligned).
+
+    Args:
+        video_path: Path to original input video
+        pt_path: Path to GVHMR .pt result (must contain smpl_params_incam)
+        output_video: Path to save rendered video
+    """
+    video_path = Path(video_path).resolve()
+    pt_path = Path(pt_path).resolve()
+    output_video = Path(output_video).resolve()
+
+    with _chdir(GVHMR_DIR):
+        from hmr4d.utils.video_io_utils import get_video_lwh, get_writer, get_video_reader
+        from hmr4d.utils.smplx_utils import make_smplx
+        from hmr4d.utils.vis.renderer import Renderer
+        from hmr4d.utils.net_utils import to_cuda
+        from tqdm import tqdm
+
+        pred = torch.load(pt_path, weights_only=False, map_location="cpu")
+
+        # Check if incam params exist
+        if "smpl_params_incam" not in pred:
+            print("  [WARN] No smpl_params_incam in .pt, skipping incam render")
+            return
+
+        # Build SMPL mesh vertices (num_betas=10 to match GVHMR output)
+        smplx_model = make_smplx("supermotion", num_betas=10).cuda()
+        smplx2smpl = torch.load(
+            "hmr4d/utils/body_model/smplx2smpl_sparse.pt", weights_only=False
+        ).cuda()
+        faces_smpl = make_smplx("smpl").faces
+
+        with torch.no_grad():
+            smplx_out = smplx_model(**to_cuda(pred["smpl_params_incam"]))
+            verts_incam = torch.stack(
+                [torch.matmul(smplx2smpl, v) for v in smplx_out.vertices]
+            )
+
+        # Setup renderer with camera intrinsics
+        length, width, height = get_video_lwh(video_path)
+        K = pred["K_fullimg"][0]
+        renderer = Renderer(width, height, device="cuda", faces=faces_smpl, K=K)
+
+        # Render mesh on each frame
+        reader = get_video_reader(video_path)
+        output_video.parent.mkdir(parents=True, exist_ok=True)
+        writer = get_writer(str(output_video), fps=30, crf=23)
+
+        for i, img_raw in tqdm(enumerate(reader), total=length, desc="Render incam"):
+            img = renderer.render_mesh(verts_incam[i].cuda(), img_raw, [0.8, 0.8, 0.8])
+            writer.write_frame(img)
+
+        writer.close()
+        reader.close()
+        print(f"  -> Incam video saved to {output_video}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="GVHMR Inference")
     parser.add_argument("--video", type=str, required=True, help="Path to input video")
@@ -201,12 +273,15 @@ def main():
     # Resolve paths to absolute
     args.video = str(Path(args.video).resolve())
     if args.output is None:
-        args.output = str(Path(f"outputs/{Path(args.video).stem}_gvhmr.pt").resolve())
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        stem = Path(args.video).stem
+        args.output = str(Path(f"outputs/{stem}_{timestamp}/gvhmr.pt").resolve())
     else:
         args.output = str(Path(args.output).resolve())
 
-    Log.info(f"[GPU] {torch.cuda.get_device_name()}")
-    pred = run_inference(args.video, args.output, args.static_cam, args.skip_render, args.f_mm)
+    print(f"[GPU] {torch.cuda.get_device_name()}")
+    run_inference(args.video, args.output, args.static_cam, args.skip_render, args.f_mm)
 
 
 if __name__ == "__main__":

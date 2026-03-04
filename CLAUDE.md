@@ -67,6 +67,15 @@ qpos = retarget.retarget(human_data)  # dict of {body_name: (pos, quat_wxyz)}
 
 ## Offline Pipeline
 
+Each run creates a timestamped output folder: `outputs/<source>_<YYYYMMDD_HHMMSS>/`
+
+Internal file naming is consistent regardless of input mode:
+- `input.mp4` — source video (recorded or symlinked)
+- `gvhmr.pt` — GVHMR SMPL parameters
+- `incam.mp4` — SMPL mesh overlay (optional)
+- `retarget.pkl` — retargeted robot motion
+- `playback.mp4` — MuJoCo playback video (optional)
+
 ```bash
 # Full pipeline: record 10s video → GVHMR → GMR → MuJoCo viewer
 python scripts/offline_pipeline.py --record --duration 10 -s

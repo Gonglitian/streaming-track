@@ -1,0 +1,6 @@
+[submodule "third_party/GMR"]
+	path = third_party/GMR
+	url = https://github.com/YanjieZe/GMR.git
+[submodule "third_party/GVHMR"]
+	path = third_party/GVHMR
+	url = https://github.com/zju3dv/GVHMR.git

@@ -25,9 +25,19 @@ class SlidingWindowBuffer:
     every `stride` frames on the latest window.
     """
 
-    def __init__(self, window_size: int = 90, stride: int = 15):
+    def __init__(self, window_size: int = 60, stride: int = 15,
+                 optimize: bool = True):
+        """
+        Args:
+            window_size: Number of frames in the GVHMR inference window.
+                         60 frames (~2s) is the optimized default (vs 90 before).
+                         Attention is O(L²), so 60 vs 90 = ~44% less compute.
+            stride: Trigger inference every N new frames.
+            optimize: Apply real-time optimizations (flash attn, skip postproc, compile).
+        """
         self._window_size = window_size
         self._stride = stride
+        self._optimize = optimize
 
         self._lock = threading.Lock()
         self._features: list[FrameFeatures] = []
@@ -105,6 +115,16 @@ class SlidingWindowBuffer:
             self._model = self._model.eval().cuda()
             print("[SlidingWindow] GVHMR model loaded")
 
+            # Apply real-time optimizations
+            if self._optimize:
+                from .optimizations import optimize_gvhmr_model
+                self._model = optimize_gvhmr_model(
+                    self._model,
+                    flash_attn=True,
+                    compile=False,  # transformer is ~6ms; compile warmup costs 30-60s
+                    skip_postproc=True,
+                )
+
     @torch.no_grad()
     def run_inference(self) -> dict | None:
         """Run GVHMR inference on the current window.
@@ -130,9 +150,6 @@ class SlidingWindowBuffer:
         f_imgseq = torch.stack([f.vit_features for f in window])  # (F, 1024)
 
         # Static camera: cam_angvel is zero
-        cam_angvel = torch.zeros(F, 6)
-
-        # Prepare data dict for GVHMR
         from hmr4d.utils.geo_transform import compute_cam_angvel
 
         # For static cam, R_w2c is identity
@@ -148,7 +165,7 @@ class SlidingWindowBuffer:
             "f_imgseq": f_imgseq,
         }
 
-        # Run GVHMR inference with FP16
+        # Run GVHMR inference with FP16 (enables Flash Attention backend)
         with torch.cuda.amp.autocast():
             pred = self._model.predict(data, static_cam=True)
 

@@ -53,8 +53,23 @@ mkdir -p "$TARGET_DIR"
 if [ -n "$1" ]; then
     echo "Extracting from: $1"
     if [[ "$1" == *.zip ]]; then
-        unzip -o "$1" -d "$TARGET_DIR/../"
-        echo "Extraction complete!"
+        # The zip contains models/smplx/*.npz — extract to temp dir then move
+        TMPDIR_EX=$(mktemp -d)
+        unzip -o "$1" -d "$TMPDIR_EX"
+        # Find the smplx dir inside the extracted tree (handles models/smplx/ or smplx/)
+        SMPLX_FOUND=$(find "$TMPDIR_EX" -type d -name "smplx" | head -1)
+        if [ -n "$SMPLX_FOUND" ]; then
+            cp -r "$SMPLX_FOUND"/* "$TARGET_DIR/"
+            echo "Extraction complete! Files copied to: $TARGET_DIR/"
+            ls -la "$TARGET_DIR/"
+        else
+            echo "ERROR: No 'smplx' directory found inside the zip"
+            echo "Contents:"
+            ls -R "$TMPDIR_EX"
+            rm -rf "$TMPDIR_EX"
+            exit 1
+        fi
+        rm -rf "$TMPDIR_EX"
     else
         echo "Expected a .zip file"
         exit 1

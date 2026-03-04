@@ -23,10 +23,17 @@ mkdir -p inputs/checkpoints/{gvhmr,hmr2,vitpose,yolo,dpvo,body_models/smplx,body
 mkdir -p inputs outputs
 
 # Download pretrained models from Google Drive
+# The Drive folder is named "checkpoints" containing {dpvo,gvhmr,hmr2,vitpose,yolo}
+# gdown --folder downloads into <output>/checkpoints/, so we download to a temp dir
+# then move contents up to avoid inputs/checkpoints/checkpoints/ nesting
 echo "[1/3] Downloading GVHMR pretrained models..."
 pip install -q gdown
 if [ ! -f inputs/checkpoints/gvhmr/gvhmr_siga24_release.ckpt ]; then
-    gdown --folder https://drive.google.com/drive/folders/1eebJ13FUEXrKBawHpJroW0sNSxLjh9xD -O inputs/checkpoints/
+    TMPDIR_DL=$(mktemp -d)
+    gdown --folder https://drive.google.com/drive/folders/1eebJ13FUEXrKBawHpJroW0sNSxLjh9xD -O "$TMPDIR_DL"
+    # Move contents from nested checkpoints/ to inputs/checkpoints/
+    cp -r "$TMPDIR_DL"/checkpoints/* inputs/checkpoints/
+    rm -rf "$TMPDIR_DL"
 else
     echo "  Already downloaded, skipping"
 fi
